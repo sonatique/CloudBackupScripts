@@ -139,6 +139,23 @@ outside `LocalRoot` — worth doing if your cloud actually contains folders by t
 | `TrashPath`, `VersionsPath` | inside `LocalRoot` | Override to keep them out of the mirror. Refused if set equal to `LocalRoot` itself |
 | `AllowInsecureHttp` | `false` | Required to allow a plain `http://` server (credentials in clear text) |
 
+## Misspelled settings
+
+A key the script does not recognise is not an error to JSON, so the setting is simply ignored
+and its **default** used instead — which looks exactly like the script disobeying you. Every
+key is now checked against the known list, with the intended one suggested:
+
+```
+[WARN] 'MaxOrphansPercent' is not a known setting and is being IGNORED - did you mean 'MaxOrphanPercent'?
+[WARN] A misspelled setting keeps its DEFAULT value, which can change what this run does.
+```
+
+In an interactive console the run then waits for a keypress so the warning cannot scroll past
+unnoticed. It never blocks an unattended run: the wait is skipped under `-Quiet` (what the
+scheduled task passes) or `-NoPause`, when the session is not interactive, or when stdin is
+redirected — and even then it releases itself after 60 seconds, so a misdetected session can
+never stall the nightly backup.
+
 ## How "incremental" works
 
 Each run walks the remote tree with `PROPFIND` (depth 1, recursive) and reads every file's
@@ -301,7 +318,8 @@ powershell -ExecutionPolicy Bypass -File .\Backup-Cloud.ps1 -DryRun -Verbose
 | `-Full` | Ignore `state.json` and re-verify every file against the local copy (size + mtime, not content) |
 | `-Verify` | Rehash every unchanged local file and compare against its recorded SHA-256; re-download on mismatch. Expensive — see **Integrity** above |
 | `-BaselineLocal` | Adopt the current local content as the SHA-256 baseline for files that have none, so future `-Verify` runs can check them. Does **not** validate that content — run once, see **Integrity** |
-| `-Quiet` | Console shows only warnings and errors (used by the scheduled task) |
+| `-Quiet` | Console shows only warnings and errors (used by the scheduled task). Also suppresses the config-warning pause |
+| `-NoPause` | Never wait for a keypress, even in an interactive console |
 | `-Verbose` | Include DEBUG lines (excluded files, kept files, versions, state details) |
 | `-ConfigPath` | Use a different config — handy for backing up several accounts |
 

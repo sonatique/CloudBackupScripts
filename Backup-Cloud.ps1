@@ -62,7 +62,8 @@ param(
     [switch] $Verify,
     [switch] $BaselineLocal,
     [switch] $DryRun,
-    [switch] $Quiet
+    [switch] $Quiet,
+    [switch] $NoPause
 )
 
 Set-StrictMode -Version Latest
@@ -134,6 +135,99 @@ try {
 
 foreach ($required in 'ServerUrl', 'Username', 'LocalRoot') {
     if (-not (Get-Prop $cfg $required)) { throw "Configuration key '$required' is missing or empty in $ConfigPath" }
+}
+
+# A misspelled key is silently ignored and its default used instead - which looks exactly
+# like the script disobeying the config. Name them rather than let that happen quietly.
+$knownKeys = @(
+    'ServerUrl', 'Username', 'Password', 'PasswordEncrypted', 'AllowInsecureHttp',
+    'RemoteRoot', 'LocalRoot', 'Exclude',
+    'DetectMoves', 'KeepVersions', 'VersionRetentionDays',
+    'DeleteRemoved', 'TrashLocalOrphans', 'MaxOrphanPercent', 'TrashRetentionDays',
+    'TrashPath', 'VersionsPath', 'StatePath', 'LogDirectory',
+    'MaxFileSizeMB', 'TimeoutSeconds', 'Retries', 'LogRetentionDays'
+)
+
+function Wait-ForAcknowledgement {
+    <#
+        Blocks until a key is pressed, but ONLY when a human is actually there to press it.
+        This script's main job is an unattended nightly run; a prompt that blocks Task
+        Scheduler would silently stop backups until the task's execution time limit kills it.
+        Hence three layers of defence: the explicit switches, an interactivity test, and a
+        timeout so that even a misdetected session cannot stall forever.
+    #>
+    param([int] $TimeoutSeconds = 60)
+
+    if ($NoPause -or $Quiet) { Write-Log 'pause skipped: -NoPause/-Quiet' 'DEBUG'; return }
+    if (-not [Environment]::UserInteractive) { Write-Log 'pause skipped: session is not interactive' 'DEBUG'; return }
+    try {
+        if ([Console]::IsInputRedirected) { Write-Log 'pause skipped: stdin is redirected' 'DEBUG'; return }
+    } catch { Write-Log 'pause skipped: stdin state unreadable' 'DEBUG'; return }
+
+    $raw = $null
+    try { $raw = $Host.UI.RawUI } catch { Write-Log 'pause skipped: host has no RawUI' 'DEBUG'; return }
+    if (-not $raw) { Write-Log 'pause skipped: host has no RawUI' 'DEBUG'; return }
+
+    Write-Host ''
+    Write-Host ("Review the warning(s) above. Press any key to continue, or Ctrl+C to abort (continues on its own in {0}s)..." -f $TimeoutSeconds) -ForegroundColor Yellow
+    try {
+        # A console's input buffer also carries focus and mouse events. Without this the
+        # very first KeyAvailable can be true for something nobody typed, and the prompt
+        # releases itself instantly.
+        try { $raw.FlushInputBuffer() } catch { }
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            if ($raw.KeyAvailable) {
+                $k = $raw.ReadKey('NoEcho,IncludeKeyDown')
+                if ($k.VirtualKeyCode -ne 0) { Write-Host ''; return }   # ignore non-key events
+            }
+            Start-Sleep -Milliseconds 150
+        }
+        Write-Host '(no key pressed - continuing)' -ForegroundColor Yellow
+    } catch {
+        # Host cannot do raw key reads (ISE, remoting, redirected input): carry on.
+    }
+}
+
+function Get-EditDistance {
+    # Levenshtein, two rolling rows - PowerShell cannot parse arithmetic inside a
+    # multi-dimensional index, so a 2-D array is more trouble than it is worth here.
+    param([string] $A, [string] $B)
+    $A = $A.ToLowerInvariant(); $B = $B.ToLowerInvariant()
+    if (-not $A) { return $B.Length }
+    if (-not $B) { return $A.Length }
+
+    $prev = New-Object 'int[]' ($B.Length + 1)
+    $curr = New-Object 'int[]' ($B.Length + 1)
+    for ($j = 0; $j -le $B.Length; $j++) { $prev[$j] = $j }
+
+    for ($i = 1; $i -le $A.Length; $i++) {
+        $curr[0] = $i
+        for ($j = 1; $j -le $B.Length; $j++) {
+            $cost = if ($A[$i - 1] -eq $B[$j - 1]) { 0 } else { 1 }
+            $del = $prev[$j] + 1
+            $ins = $curr[$j - 1] + 1
+            $sub = $prev[$j - 1] + $cost
+            $curr[$j] = [Math]::Min([Math]::Min($del, $ins), $sub)
+        }
+        $swap = $prev; $prev = $curr; $curr = $swap
+    }
+    return $prev[$B.Length]
+}
+
+# Held until the log file exists a few lines below, so an unattended run records this too.
+$script:StartupWarnings = New-Object 'System.Collections.Generic.List[string]'
+foreach ($bad in @($cfg.PSObject.Properties.Name | Where-Object { $knownKeys -notcontains $_ })) {
+    $suggestion = $knownKeys |
+        Where-Object { (Get-EditDistance $bad $_) -le 3 } |
+        Sort-Object { Get-EditDistance $bad $_ } |
+        Select-Object -First 1
+    if ($suggestion) {
+        $script:StartupWarnings.Add(("'{0}' is not a known setting and is being IGNORED - did you mean '{1}'? (in {2})" -f $bad, $suggestion, $ConfigPath))
+    } else {
+        $script:StartupWarnings.Add(("'{0}' is not a known setting and is being IGNORED. (in {1})" -f $bad, $ConfigPath))
+    }
 }
 
 $ServerUrl   = ([string](Get-Prop $cfg 'ServerUrl')).TrimEnd('/')
@@ -210,6 +304,12 @@ $configTag = [IO.Path]::GetFileNameWithoutExtension($ConfigPath)
 $logDir = [string](Get-Prop $cfg 'LogDirectory' (Join-Path $PSScriptRoot 'logs'))
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $script:LogFile = Join-Path $logDir ('backup-{0}-{1}.log' -f $configTag, (Get-Date -Format 'yyyyMMdd'))
+
+foreach ($w in $script:StartupWarnings) { Write-Log $w 'WARN' }
+if ($script:StartupWarnings.Count -gt 0) {
+    Write-Log 'A misspelled setting keeps its DEFAULT value, which can change what this run does.' 'WARN'
+    Wait-ForAcknowledgement
+}
 
 # ------------------------------------------------------------- single run ----
 
@@ -995,6 +1095,19 @@ try {
                 Write-Log ('Orphan sweep REFUSED: {0} of {1} local files ({2:N1}%) have no counterpart on the server, above the {3}% limit. Check RemoteRoot/LocalRoot. Nothing was moved.' -f `
                     $orphans.Count, $localFiles.Count, $share, $MaxOrphanPercent) 'ERROR'
                 $stats.Failed++
+
+                # A bare percentage is not diagnosable. Write the candidates out so the
+                # pattern behind them can actually be looked at before anything is moved.
+                try {
+                    $report = Join-Path $logDir ('orphans-{0}-{1}.txt' -f $configTag, $runStamp)
+                    $orphans | Set-Content -LiteralPath $report -Encoding UTF8
+                    Write-Log "the full list of paths considered orphaned was written to $report"
+                } catch {
+                    Write-Log "could not write the orphan report - $($_.Exception.Message)" 'WARN'
+                }
+                foreach ($sample in ($orphans | Select-Object -First 15)) {
+                    Write-Log "    orphan candidate: $sample"
+                }
             } elseif ($orphans.Count -eq 0) {
                 Write-Log "Orphan sweep: nothing local without a counterpart ($($localFiles.Count) file(s) checked)." 'DEBUG'
             } else {

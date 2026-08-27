@@ -1,0 +1,18 @@
+# --- credentials -------------------------------------------------------------
+# Real configs hold an app password (DPAPI-encrypted, but still a secret) and are
+# named freely - cloud1.json, sylvain.json, ... - so ignore every root-level .json
+# and re-admit only the template.
+/*.json
+!config.example.json
+
+# --- runtime artefacts -------------------------------------------------------
+state-*.json
+state.json
+logs/
+*.log
+*.lock
+*.part
+
+# --- backup areas, should never live in the repo -----------------------------
+_trash/
+_versions/

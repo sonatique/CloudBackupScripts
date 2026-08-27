@@ -1,0 +1,35 @@
+{
+  "ServerUrl": "https://cloud.example.com",
+  "Username": "your-cloud-username",
+  "PasswordEncrypted": "",
+
+  "RemoteRoot": "/",
+  "LocalRoot": "D:\\Backups\\Nextcloud",
+
+  "Exclude": [
+    "*.tmp",
+    "~$*",
+    ".DS_Store",
+    "Thumbs.db",
+    ".owncloudsync.log*",
+    "._sync_*.db*",
+    ".sync_*.db*",
+    ".*.~*",
+    "*.~lock.*#",
+    "Photos/RAW/*"
+  ],
+
+  "DetectMoves": true,
+  "KeepVersions": true,
+  "VersionRetentionDays": 90,
+
+  "DeleteRemoved": false,
+  "TrashLocalOrphans": false,
+  "MaxOrphanPercent": 25,
+  "TrashRetentionDays": 30,
+
+  "MaxFileSizeMB": 0,
+  "TimeoutSeconds": 300,
+  "Retries": 3,
+  "LogRetentionDays": 60
+}

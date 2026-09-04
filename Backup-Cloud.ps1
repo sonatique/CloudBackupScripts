@@ -112,14 +112,23 @@ function Get-Prop {
 # config file's name so several accounts can share this folder.
 $configTag = [IO.Path]::GetFileNameWithoutExtension($ConfigPath)
 $bootstrapLogDir = Join-Path $PSScriptRoot 'logs'
-try {
-    if (-not (Test-Path -LiteralPath $bootstrapLogDir)) {
-        New-Item -ItemType Directory -Path $bootstrapLogDir -Force | Out-Null
+
+# If the script's own folder is not writable (installed under Program Files, a read-only
+# share, a policy-locked profile), fall back to TEMP rather than lose the one record of
+# why an unattended run failed.
+foreach ($candidate in @($bootstrapLogDir, (Join-Path $env:TEMP 'CloudBackupScript-logs'))) {
+    try {
+        if (-not (Test-Path -LiteralPath $candidate)) { New-Item -ItemType Directory -Path $candidate -Force | Out-Null }
+        $probe = Join-Path $candidate ('backup-{0}-{1}.log' -f $configTag, (Get-Date -Format 'yyyyMMdd'))
+        Add-Content -LiteralPath $probe -Value '' -Encoding UTF8 -ErrorAction Stop
+        $bootstrapLogDir = $candidate
+        $script:LogFile  = $probe
+        break
+    } catch {
+        Write-Host "Cannot write a log in $candidate - $($_.Exception.Message)" -ForegroundColor Red
     }
-    $script:LogFile = Join-Path $bootstrapLogDir ('backup-{0}-{1}.log' -f $configTag, (Get-Date -Format 'yyyyMMdd'))
-} catch {
-    Write-Host "Could not create a log file in $bootstrapLogDir - $($_.Exception.Message)" -ForegroundColor Red
 }
+if (-not $script:LogFile) { Write-Host 'No writable log location found; errors will only appear on screen.' -ForegroundColor Red }
 
 function Stop-WithError {
     # Startup failures: recorded in the log, then a clean exit. 'throw' here would print a

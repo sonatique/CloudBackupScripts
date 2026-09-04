@@ -105,8 +105,32 @@ function Get-Prop {
     return $value
 }
 
+# --------------------------------------------------- log file, early -------
+# Opened before anything else can fail. A scheduled task has no console to show a startup
+# error on, so without this an unreadable drive letter or an undecryptable password is a
+# red flash on screen and nothing at all on disk. State, lock and log names carry the
+# config file's name so several accounts can share this folder.
+$configTag = [IO.Path]::GetFileNameWithoutExtension($ConfigPath)
+$bootstrapLogDir = Join-Path $PSScriptRoot 'logs'
+try {
+    if (-not (Test-Path -LiteralPath $bootstrapLogDir)) {
+        New-Item -ItemType Directory -Path $bootstrapLogDir -Force | Out-Null
+    }
+    $script:LogFile = Join-Path $bootstrapLogDir ('backup-{0}-{1}.log' -f $configTag, (Get-Date -Format 'yyyyMMdd'))
+} catch {
+    Write-Host "Could not create a log file in $bootstrapLogDir - $($_.Exception.Message)" -ForegroundColor Red
+}
+
+function Stop-WithError {
+    # Startup failures: recorded in the log, then a clean exit. 'throw' here would print a
+    # PowerShell stack trace to a console nobody is watching and leave no trace behind.
+    param([Parameter(Mandatory)][string] $Message)
+    Write-Log $Message 'ERROR'
+    exit 2
+}
+
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
-    throw "Configuration file not found: $ConfigPath (copy config.example.json to config.json and edit it)"
+    Stop-WithError "Configuration file not found: $ConfigPath (copy config.example.json to config.json and edit it)"
 }
 $configRaw = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8
 try {
@@ -134,7 +158,7 @@ try {
 }
 
 foreach ($required in 'ServerUrl', 'Username', 'LocalRoot') {
-    if (-not (Get-Prop $cfg $required)) { throw "Configuration key '$required' is missing or empty in $ConfigPath" }
+    if (-not (Get-Prop $cfg $required)) { Stop-WithError "Configuration key '$required' is missing or empty in $ConfigPath" }
 }
 
 # A misspelled key is silently ignored and its default used instead - which looks exactly
@@ -253,25 +277,27 @@ $LogRetentionDays   = [int](Get-Prop $cfg 'LogRetentionDays' 60)
 $TrashPath    = [string](Get-Prop $cfg 'TrashPath'    ([IO.Path]::Combine($LocalRoot, '_trash')))
 $VersionsPath = [string](Get-Prop $cfg 'VersionsPath' ([IO.Path]::Combine($LocalRoot, '_versions')))
 
-if ($ServerUrl -notmatch '^https?://') { throw "ServerUrl must start with http:// or https:// (got '$ServerUrl')" }
+if ($ServerUrl -notmatch '^https?://') { Stop-WithError "ServerUrl must start with http:// or https:// (got '$ServerUrl')" }
 # A mapped drive letter exists only inside the logon session that mapped it, so a path like
 # "Y:\owncloud" can work when run by hand and be missing under Task Scheduler. Say so plainly
 # instead of failing later with a bare "cannot find drive".
 $localRootRoot = ''
 try { $localRootRoot = [IO.Path]::GetPathRoot($LocalRoot) } catch { }
 if ($localRootRoot -match '^[A-Za-z]:\\?$' -and -not (Test-Path -LiteralPath $localRootRoot)) {
-    throw ("LocalRoot '{0}' is on drive {1} which is not available in this session.`n" -f $LocalRoot, $localRootRoot.Substring(0, 2)) +
-          "If that is a mapped network drive, note that drive letters are per-logon-session: a scheduled task will not see it. " +
-          'Use the UNC path instead, e.g. "\\server\share\owncloud" (doubled in JSON: "\\\\server\\share\\owncloud").'
+    $msg = ("LocalRoot '{0}' is on drive {1} which is not available in this session. " -f $LocalRoot, $localRootRoot.Substring(0, 2)) +
+           "If that is a mapped network drive, note that drive letters belong to the logon session that created them: " +
+           "a scheduled task does not inherit them, which is why this can work by hand and fail under Task Scheduler. " +
+           'Use the UNC path instead, e.g. "\\server\share\owncloud" (doubled in JSON: "\\\\server\\share\\owncloud").'
+    Stop-WithError $msg
 }
 
 foreach ($special in @($TrashPath, $VersionsPath)) {
     if ([IO.Path]::GetFullPath($special).TrimEnd('\') -eq [IO.Path]::GetFullPath($LocalRoot).TrimEnd('\')) {
-        throw "TrashPath/VersionsPath must not be LocalRoot itself - retention would purge the mirror."
+        Stop-WithError "TrashPath/VersionsPath must not be LocalRoot itself - retention would purge the mirror."
     }
 }
 if ($ServerUrl -match '^http://' -and -not [bool](Get-Prop $cfg 'AllowInsecureHttp' $false)) {
-    throw "ServerUrl uses plain http://. Credentials would be sent in clear text. Set AllowInsecureHttp to true to override."
+    Stop-WithError "ServerUrl uses plain http://. Credentials would be sent in clear text. Set AllowInsecureHttp to true to override."
 }
 
 # Password: either DPAPI-encrypted (per Windows user, written by Set-Password.ps1) or plaintext.
@@ -284,12 +310,12 @@ if ($encrypted) {
         $Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     } catch {
-        throw "PasswordEncrypted could not be decrypted. It is bound to the Windows account and machine that created it. Re-run Set-Password.ps1 as the account the scheduled task uses."
+        Stop-WithError "PasswordEncrypted could not be decrypted. It is bound to the Windows account and machine that created it. Re-run Set-Password.ps1 as the account the scheduled task uses."
     }
 } elseif ($plain) {
     $Password = [string]$plain
 } else {
-    throw "No credential found in $ConfigPath. Run .\Set-Password.ps1 to store an app password, or set the 'Password' key."
+    Stop-WithError "No credential found in $ConfigPath. Run .\Set-Password.ps1 to store an app password, or set the 'Password' key."
 }
 
 $authHeader = 'Basic ' + [Convert]::ToBase64String(
@@ -297,13 +323,20 @@ $authHeader = 'Basic ' + [Convert]::ToBase64String(
 
 # --------------------------------------------------------------- log file ----
 
-# State, lock and log names carry the config file's name, so several configs
-# (one per cloud account) can share this folder without stepping on each other.
-$configTag = [IO.Path]::GetFileNameWithoutExtension($ConfigPath)
-
-$logDir = [string](Get-Prop $cfg 'LogDirectory' (Join-Path $PSScriptRoot 'logs'))
-if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-$script:LogFile = Join-Path $logDir ('backup-{0}-{1}.log' -f $configTag, (Get-Date -Format 'yyyyMMdd'))
+# The bootstrap log above already exists; move to the configured directory if it differs,
+# and say so in both files so neither trail dead-ends.
+$logDir = [string](Get-Prop $cfg 'LogDirectory' $bootstrapLogDir)
+if ($logDir -ne $bootstrapLogDir) {
+    $newLog = Join-Path $logDir ('backup-{0}-{1}.log' -f $configTag, (Get-Date -Format 'yyyyMMdd'))
+    try {
+        if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        Write-Log "continuing in the configured log directory: $newLog" 'DEBUG'
+        $script:LogFile = $newLog
+        Write-Log "(startup was logged in $bootstrapLogDir until the configuration was read)" 'DEBUG'
+    } catch {
+        Write-Log "LogDirectory '$logDir' is unusable ($($_.Exception.Message)) - staying in $bootstrapLogDir" 'WARN'
+    }
+}
 
 foreach ($w in $script:StartupWarnings) { Write-Log $w 'WARN' }
 if ($script:StartupWarnings.Count -gt 0) {

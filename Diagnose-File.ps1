@@ -17,7 +17,7 @@
     e.g. "Administration/Membres/Acces.../FILE.pdf"
 
 .EXAMPLE
-    .\Diagnose-File.ps1 -ConfigPath .\polygones.json -RelPath "Administration/Membres/x.pdf"
+    .\Diagnose-File.ps1 -ConfigPath .\cloud1.json -RelPath "Documents/Reports/summary.pdf"
 #>
 [CmdletBinding()]
 param(
